@@ -1203,13 +1203,14 @@
       </div>
 
       <div class="notice">
-        As alterações ficam salvas apenas neste navegador. Use "Backup" para
-        guardar uma cópia do catálogo ou levar para outro aparelho.
+        Com a chave do GitHub conectada (aba "Publicação"), tudo o que você salva aqui
+        vai direto para o site e aparece para todos os clientes. Sem a chave, fica só neste navegador.
       </div>
 
       <div class="admin-tabs">
         <button class="active" type="button" data-tab="productsPanel">Produtos</button>
         <button type="button" data-tab="settingsPanel">Configurações</button>
+        <button type="button" data-tab="publishPanel">Publicação</button>
         <button type="button" data-tab="backupPanel">Backup</button>
         <button type="button" data-tab="securityPanel">Acesso</button>
       </div>
@@ -1272,6 +1273,24 @@
             <button class="btn" type="submit">Salvar configurações</button>
           </div>
         </form>
+      </section>
+
+      <section class="admin-panel" id="publishPanel">
+        <div class="backup-box">
+          <h4>Publicar no site para todos os clientes</h4>
+          <p>Cole aqui a chave do GitHub da loja (feita uma única vez em github.com/settings/personal-access-tokens, com permissão "Contents: Read and write" só no repositório JardyBeachWear). A chave fica guardada apenas neste aparelho.</p>
+          <form id="publishForm">
+            <div class="form-group">
+              <label for="githubToken">Chave do GitHub</label>
+              <input class="field" id="githubToken" type="password" autocomplete="off" placeholder="github_pat_...">
+            </div>
+            <div class="form-actions">
+              <button class="btn" type="submit">Conectar e publicar agora</button>
+              <button class="btn btn-outline" type="button" id="disconnectGithub">Desconectar</button>
+            </div>
+          </form>
+          <p id="publishStatus" aria-live="polite"></p>
+        </div>
       </section>
 
       <section class="admin-panel" id="backupPanel">
@@ -1412,8 +1431,14 @@
       cart: "jardy_cart_v4",
       customer: "jardy_customer_v4",
       credentials: "jardy_creds_v4",
-      session: "jardy_session_v4"
+      session: "jardy_session_v4",
+      githubToken: "jardy_github_token_v1",
+      pending: "jardy_pending_publish_v1"
     };
+
+    /* Publicação: o catálogo e as configurações ficam no arquivo loja.json do GitHub da loja,
+       e todo cliente que abre o site lê esse arquivo. */
+    const PUBLISH = { owner: "jardybeachwear", repo: "JardyBeachWear", branch: "main", path: "loja.json" };
 
     const COLOR_MAP = {
       "preto": "#1f1b19",
@@ -1606,9 +1631,124 @@
     const $ = id => document.getElementById(id);
 
     function saveStore() {
-      if (storageSet(STORAGE_KEYS.store, JSON.stringify(store))) return true;
+      store.updatedAt = Date.now();
+      const savedHere = storageSet(STORAGE_KEYS.store, JSON.stringify(store));
+      if (publishToken()) {
+        // com a chave do GitHub, a alteração vai para o site de todos os clientes
+        storageSet(STORAGE_KEYS.pending, "1");
+        schedulePublish();
+        return true;
+      }
+      if (savedHere) return true;
       showToast("Não foi possível salvar: o espaço do navegador acabou. Tente uma foto menor.");
       return false;
+    }
+
+    /* ---------- Publicação no site (GitHub) ---------- */
+
+    let publishTimer = null;
+    let publishing = false;
+    let publishAgain = false;
+
+    function publishToken() { return (storageGet(STORAGE_KEYS.githubToken) || "").trim(); }
+
+    function githubApi(path, options = {}) {
+      const headers = { "Accept": "application/vnd.github+json", ...(options.headers || {}) };
+      const token = publishToken();
+      if (token && options.auth !== false) headers.Authorization = `Bearer ${token}`;
+      return fetch(`https://api.github.com/repos/${PUBLISH.owner}/${PUBLISH.repo}${path}`, { ...options, headers, cache: "no-store" });
+    }
+
+    function toBase64(text) {
+      const bytes = new TextEncoder().encode(text);
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return btoa(binary);
+    }
+
+    function setPublishStatus(text, ok) {
+      const el = $("publishStatus");
+      if (!el) return;
+      el.textContent = text;
+      el.style.color = ok === false ? "var(--danger)" : ok ? "#3f6b4a" : "";
+    }
+
+    function schedulePublish() {
+      clearTimeout(publishTimer);
+      setPublishStatus("Publicando alterações no site…");
+      publishTimer = setTimeout(publishNow, 1200);
+    }
+
+    async function currentSha() {
+      const res = await githubApi(`/contents/${PUBLISH.path}?ref=${PUBLISH.branch}`);
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(res.status === 401 ? "Chave do GitHub inválida ou vencida." : `GitHub respondeu ${res.status}.`);
+      return (await res.json()).sha || null;
+    }
+
+    async function publishNow() {
+      if (publishing) { publishAgain = true; return; }
+      if (!publishToken()) return;
+      publishing = true;
+      try {
+        const body = JSON.stringify({ app: "jardy", version: 4, updatedAt: store.updatedAt || Date.now(), store });
+        const content = toBase64(body);
+        let ok = false;
+        for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+          const sha = await currentSha();
+          const res = await githubApi(`/contents/${PUBLISH.path}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              message: `Atualiza a loja pelo painel (${new Date().toLocaleString("pt-BR")})`,
+              content, branch: PUBLISH.branch, ...(sha ? { sha } : {})
+            })
+          });
+          if (res.ok) { ok = true; break; }
+          if (res.status === 409 || res.status === 422) continue;   // alguém publicou antes: tenta de novo com a versão nova
+          if (res.status === 401 || res.status === 403) throw new Error("A chave do GitHub não tem permissão para salvar no site.");
+          throw new Error(`GitHub respondeu ${res.status}.`);
+        }
+        if (!ok) throw new Error("Não foi possível publicar agora. Tente salvar de novo.");
+        storageSet(STORAGE_KEYS.pending, "");
+        setPublishStatus(`Publicado no site às ${new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}. Os clientes já recebem a versão nova.`, true);
+        showToast("Alterações publicadas no site.");
+      } catch (error) {
+        setPublishStatus(error.message || "Erro ao publicar.", false);
+        showToast("Salvo neste aparelho, mas não publicado: " + (error.message || "erro ao publicar."));
+      } finally {
+        publishing = false;
+        if (publishAgain) { publishAgain = false; publishNow(); }
+      }
+    }
+
+    /* Lê a versão publicada (para todos os clientes). Tenta a API do GitHub (sempre atualizada)
+       e, se ela não responder, o arquivo publicado junto com o site. */
+    async function fetchPublished() {
+      try {
+        const res = await githubApi(`/contents/${PUBLISH.path}?ref=${PUBLISH.branch}`,
+          { auth: false, headers: { "Accept": "application/vnd.github.raw+json" } });
+        if (res.ok) return await res.json();
+      } catch { /* tenta o arquivo do site */ }
+      try {
+        const res = await fetch(`${PUBLISH.path}?t=${Date.now()}`, { cache: "no-store" });
+        if (res.ok) return await res.json();
+      } catch { /* sem versão publicada */ }
+      return null;
+    }
+
+    async function loadPublished() {
+      const data = await fetchPublished();
+      const incoming = data && (data.store || data);
+      if (!incoming || !Array.isArray(incoming.products)) return;
+      // no aparelho do administrador, uma alteração que ainda não subiu não é apagada
+      if (storageGet(STORAGE_KEYS.pending) === "1" && publishToken()) return;
+      store = { ...structuredClone(defaultStore), ...incoming, products: incoming.products.map(normalizeProduct) };
+      storageSet(STORAGE_KEYS.store, JSON.stringify(store));
+      applyStoreSettings();
+      renderShop();
+      renderCart();
+      if ($("adminModal").classList.contains("open")) { renderAdminProducts(); populateSettingsForm(); }
     }
 
     function saveCart() {
@@ -2089,6 +2229,7 @@
 
     function openAdmin() {
       populateSettingsForm();
+      refreshPublishPanel();
       renderAdminProducts();
       closeModal("loginModal");
       openModal("adminModal");
@@ -2391,6 +2532,45 @@
       showToast("Credenciais alteradas.");
     });
 
+    function refreshPublishPanel() {
+      const connected = Boolean(publishToken());
+      $("githubToken").value = "";
+      $("githubToken").placeholder = connected ? "Chave conectada (cole outra para trocar)" : "github_pat_...";
+      $("disconnectGithub").hidden = !connected;
+      if (!publishing) setPublishStatus(connected
+        ? (storageGet(STORAGE_KEYS.pending) === "1" ? "Há alterações ainda não publicadas. Clique em \"Conectar e publicar agora\"." : "Conectado. Cada alteração salva vai para o site.")
+        : "Ainda não conectado: as alterações ficam só neste navegador.", connected ? true : null);
+    }
+
+    $("publishForm").addEventListener("submit", async event => {
+      event.preventDefault();
+      const typed = $("githubToken").value.trim();
+      const previous = publishToken();
+      if (typed) storageSet(STORAGE_KEYS.githubToken, typed);
+      if (!publishToken()) { showToast("Cole a chave do GitHub."); return; }
+      setPublishStatus("Conferindo a chave…");
+      try {
+        const res = await githubApi("");
+        const repo = res.ok ? await res.json() : null;
+        if (!repo || !repo.permissions || !repo.permissions.push) throw new Error("Essa chave não tem permissão para salvar no repositório da loja.");
+      } catch (error) {
+        if (typed) storageSet(STORAGE_KEYS.githubToken, previous);
+        setPublishStatus(error.message || "Não foi possível conferir a chave.", false);
+        return;
+      }
+      store.updatedAt = Date.now();
+      storageSet(STORAGE_KEYS.store, JSON.stringify(store));
+      storageSet(STORAGE_KEYS.pending, "1");
+      refreshPublishPanel();
+      await publishNow();
+    });
+
+    $("disconnectGithub").addEventListener("click", () => {
+      storageSet(STORAGE_KEYS.githubToken, "");
+      refreshPublishPanel();
+      showToast("Chave do GitHub removida deste aparelho.");
+    });
+
     /* ---------- Eventos ---------- */
 
     document.addEventListener("click", event => {
@@ -2483,6 +2663,7 @@
     renderShop();
     loadCustomer();
     renderCart();
+    loadPublished();
   </script>
 </body>
 </html>
