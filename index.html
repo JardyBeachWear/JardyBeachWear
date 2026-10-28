@@ -1203,14 +1203,13 @@
       </div>
 
       <div class="notice">
-        Com a chave do GitHub conectada (aba "Publicação"), tudo o que você salva aqui
-        vai direto para o site e aparece para todos os clientes. Sem a chave, fica só neste navegador.
+        Tudo o que você salva aqui vai direto para o site e aparece para todos os clientes
+        (leva poucos segundos). <span id="publishStatus" aria-live="polite"></span>
       </div>
 
       <div class="admin-tabs">
         <button class="active" type="button" data-tab="productsPanel">Produtos</button>
         <button type="button" data-tab="settingsPanel">Configurações</button>
-        <button type="button" data-tab="publishPanel">Publicação</button>
         <button type="button" data-tab="backupPanel">Backup</button>
         <button type="button" data-tab="securityPanel">Acesso</button>
       </div>
@@ -1275,24 +1274,6 @@
         </form>
       </section>
 
-      <section class="admin-panel" id="publishPanel">
-        <div class="backup-box">
-          <h4>Publicar no site para todos os clientes</h4>
-          <p>Cole aqui a chave do GitHub da loja (feita uma única vez em github.com/settings/personal-access-tokens, com permissão "Contents: Read and write" só no repositório JardyBeachWear). A chave fica guardada apenas neste aparelho.</p>
-          <form id="publishForm">
-            <div class="form-group">
-              <label for="githubToken">Chave do GitHub</label>
-              <input class="field" id="githubToken" type="password" autocomplete="off" placeholder="github_pat_...">
-            </div>
-            <div class="form-actions">
-              <button class="btn" type="submit">Conectar e publicar agora</button>
-              <button class="btn btn-outline" type="button" id="disconnectGithub">Desconectar</button>
-            </div>
-          </form>
-          <p id="publishStatus" aria-live="polite"></p>
-        </div>
-      </section>
-
       <section class="admin-panel" id="backupPanel">
         <div class="backup-box">
           <h4>Baixar backup</h4>
@@ -1312,23 +1293,10 @@
       </section>
 
       <section class="admin-panel" id="securityPanel">
-        <h3 style="margin-bottom:15px">Alterar credenciais demonstrativas</h3>
-
-        <form id="securityForm">
-          <div class="form-group">
-            <label for="newAdminUser">Novo usuário</label>
-            <input class="field" id="newAdminUser" autocomplete="username" required>
-          </div>
-          <div class="form-group">
-            <label for="currentAdminPassword">Senha atual</label>
-            <input class="field" id="currentAdminPassword" type="password" autocomplete="current-password" required>
-          </div>
-          <div class="form-group">
-            <label for="newAdminPassword">Nova senha (mínimo 8 caracteres)</label>
-            <input class="field" id="newAdminPassword" type="password" minlength="8" autocomplete="new-password" required>
-          </div>
-          <button class="btn" type="submit">Alterar acesso</button>
-        </form>
+        <div class="backup-box">
+          <h4>Usuário e senha do painel</h4>
+          <p>O acesso é conferido pelo servidor da loja. Para trocar o usuário ou a senha, entre no Render da loja, abra o serviço "jardy-painel", vá em Environment e altere ADMIN_USER e ADMIN_PASSWORD. A troca vale para todos os aparelhos em cerca de 1 minuto.</p>
+        </div>
       </section>
     </div>
   </div>
@@ -1432,13 +1400,15 @@
       customer: "jardy_customer_v4",
       credentials: "jardy_creds_v4",
       session: "jardy_session_v4",
-      githubToken: "jardy_github_token_v1",
+      adminToken: "jardy_admin_token_v1",
       pending: "jardy_pending_publish_v1"
     };
 
     /* Publicação: o catálogo e as configurações ficam no arquivo loja.json do GitHub da loja,
        e todo cliente que abre o site lê esse arquivo. */
     const PUBLISH = { owner: "jardybeachwear", repo: "JardyBeachWear", branch: "main", path: "loja.json" };
+    /* Servidor do painel (Render da Jardy): confere o login e grava o loja.json */
+    const PANEL_API = "https://jardy-painel.onrender.com";
 
     const COLOR_MAP = {
       "preto": "#1f1b19",
@@ -1624,7 +1594,6 @@
 
     let store = loadStore();
     let cart = safeParse(storageGet(STORAGE_KEYS.cart), []).filter(item => item && item.key && item.id);
-    let credentials = safeParse(storageGet(STORAGE_KEYS.credentials), { user: "admin", password: "Praia@2026" });
     let viewState = { id: null, color: "", size: "", qty: 1 };
     let toastTimer = null;
 
@@ -1633,8 +1602,8 @@
     function saveStore() {
       store.updatedAt = Date.now();
       const savedHere = storageSet(STORAGE_KEYS.store, JSON.stringify(store));
-      if (publishToken()) {
-        // com a chave do GitHub, a alteração vai para o site de todos os clientes
+      if (adminToken()) {
+        // logado no servidor: a alteração vai para o site de todos os clientes
         storageSet(STORAGE_KEYS.pending, "1");
         schedulePublish();
         return true;
@@ -1650,21 +1619,36 @@
     let publishing = false;
     let publishAgain = false;
 
-    function publishToken() { return (storageGet(STORAGE_KEYS.githubToken) || "").trim(); }
+    function adminToken() { return sessionGet(STORAGE_KEYS.adminToken) || ""; }
 
     function githubApi(path, options = {}) {
       const headers = { "Accept": "application/vnd.github+json", ...(options.headers || {}) };
-      const token = publishToken();
-      if (token && options.auth !== false) headers.Authorization = `Bearer ${token}`;
       return fetch(`https://api.github.com/repos/${PUBLISH.owner}/${PUBLISH.repo}${path}`, { ...options, headers, cache: "no-store" });
     }
 
-    function toBase64(text) {
-      const bytes = new TextEncoder().encode(text);
-      let binary = "";
-      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-      return btoa(binary);
+    /* Chama o servidor do painel. No plano grátis ele dorme: a primeira chamada pode levar ~50 s. */
+    async function panelApi(path, options = {}, waitMs = 75000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), waitMs);
+      try {
+        const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+        const token = adminToken();
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const res = await fetch(PANEL_API + path, { ...options, headers, signal: controller.signal, cache: "no-store" });
+        let data = {};
+        try { data = await res.json(); } catch { /* sem corpo */ }
+        if (!res.ok) throw Object.assign(new Error(data.erro || `Servidor respondeu ${res.status}.`), { status: res.status });
+        return data;
+      } catch (error) {
+        if (error.name === "AbortError") throw new Error("O servidor do painel não respondeu. Tente de novo em instantes.");
+        if (error instanceof TypeError) throw new Error("Sem conexão com o servidor do painel.");
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
     }
+
+    function wakePanel() { fetch(PANEL_API + "/api/status", { cache: "no-store" }).catch(() => {}); }
 
     function setPublishStatus(text, ok) {
       const el = $("publishStatus");
@@ -1676,46 +1660,22 @@
     function schedulePublish() {
       clearTimeout(publishTimer);
       setPublishStatus("Publicando alterações no site…");
-      publishTimer = setTimeout(publishNow, 1200);
-    }
-
-    async function currentSha() {
-      const res = await githubApi(`/contents/${PUBLISH.path}?ref=${PUBLISH.branch}`);
-      if (res.status === 404) return null;
-      if (!res.ok) throw new Error(res.status === 401 ? "Chave do GitHub inválida ou vencida." : `GitHub respondeu ${res.status}.`);
-      return (await res.json()).sha || null;
+      publishTimer = setTimeout(publishNow, 900);
     }
 
     async function publishNow() {
       if (publishing) { publishAgain = true; return; }
-      if (!publishToken()) return;
+      if (!adminToken()) return;
       publishing = true;
       try {
-        const body = JSON.stringify({ app: "jardy", version: 4, updatedAt: store.updatedAt || Date.now(), store });
-        const content = toBase64(body);
-        let ok = false;
-        for (let attempt = 0; attempt < 2 && !ok; attempt++) {
-          const sha = await currentSha();
-          const res = await githubApi(`/contents/${PUBLISH.path}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              message: `Atualiza a loja pelo painel (${new Date().toLocaleString("pt-BR")})`,
-              content, branch: PUBLISH.branch, ...(sha ? { sha } : {})
-            })
-          });
-          if (res.ok) { ok = true; break; }
-          if (res.status === 409 || res.status === 422) continue;   // alguém publicou antes: tenta de novo com a versão nova
-          if (res.status === 401 || res.status === 403) throw new Error("A chave do GitHub não tem permissão para salvar no site.");
-          throw new Error(`GitHub respondeu ${res.status}.`);
-        }
-        if (!ok) throw new Error("Não foi possível publicar agora. Tente salvar de novo.");
+        await panelApi("/api/loja", { method: "PUT", body: JSON.stringify({ store }) });
         storageSet(STORAGE_KEYS.pending, "");
         setPublishStatus(`Publicado no site às ${new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}. Os clientes já recebem a versão nova.`, true);
         showToast("Alterações publicadas no site.");
       } catch (error) {
-        setPublishStatus(error.message || "Erro ao publicar.", false);
-        showToast("Salvo neste aparelho, mas não publicado: " + (error.message || "erro ao publicar."));
+        if (error.status === 401) { sessionRemove(STORAGE_KEYS.adminToken); sessionRemove(STORAGE_KEYS.session); }
+        setPublishStatus((error.message || "Erro ao publicar.") + (error.status === 401 ? "" : " A alteração ficou guardada neste aparelho: salve de novo para publicar."), false);
+        showToast("Não publicado: " + (error.message || "erro ao publicar."));
       } finally {
         publishing = false;
         if (publishAgain) { publishAgain = false; publishNow(); }
@@ -1727,7 +1687,7 @@
     async function fetchPublished() {
       try {
         const res = await githubApi(`/contents/${PUBLISH.path}?ref=${PUBLISH.branch}`,
-          { auth: false, headers: { "Accept": "application/vnd.github.raw+json" } });
+          { headers: { "Accept": "application/vnd.github.raw+json" } });
         if (res.ok) return await res.json();
       } catch { /* tenta o arquivo do site */ }
       try {
@@ -1742,7 +1702,7 @@
       const incoming = data && (data.store || data);
       if (!incoming || !Array.isArray(incoming.products)) return;
       // no aparelho do administrador, uma alteração que ainda não subiu não é apagada
-      if (storageGet(STORAGE_KEYS.pending) === "1" && publishToken()) return;
+      if (storageGet(STORAGE_KEYS.pending) === "1" && adminToken()) return;
       store = { ...structuredClone(defaultStore), ...incoming, products: incoming.products.map(normalizeProduct) };
       storageSet(STORAGE_KEYS.store, JSON.stringify(store));
       applyStoreSettings();
@@ -2216,20 +2176,22 @@
     }
 
     function openLogin() {
-      if (sessionGet(STORAGE_KEYS.session) === "true") { openAdmin(); return; }
+      if (sessionGet(STORAGE_KEYS.session) === "true" && adminToken()) { openAdmin(); return; }
+      wakePanel();   // acorda o servidor enquanto a pessoa digita a senha
       $("loginForm").reset();
       openModal("loginModal");
     }
 
     function logoutAdmin() {
       sessionRemove(STORAGE_KEYS.session);
+      sessionRemove(STORAGE_KEYS.adminToken);
       closeModal("adminModal");
       showToast("Sessão administrativa encerrada.");
     }
 
     function openAdmin() {
       populateSettingsForm();
-      refreshPublishPanel();
+      setPublishStatus(storageGet(STORAGE_KEYS.pending) === "1" ? "Há alterações deste aparelho ainda não publicadas: salve de novo para publicar." : "");
       renderAdminProducts();
       closeModal("loginModal");
       openModal("adminModal");
@@ -2503,72 +2465,27 @@
       showToast("Produtos originais restaurados.");
     }
 
-    $("loginForm").addEventListener("submit", event => {
+    $("loginForm").addEventListener("submit", async event => {
       event.preventDefault();
-      if ($("loginUser").value.trim() === credentials.user && $("loginPassword").value === credentials.password) {
-        sessionSet(STORAGE_KEYS.session, "true");
-        openAdmin();
-      } else {
-        showToast("Usuário ou senha incorretos.");
-      }
-    });
-
-    $("securityForm").addEventListener("submit", event => {
-      event.preventDefault();
-      const newUser = $("newAdminUser").value.trim();
-      const newPassword = $("newAdminPassword").value;
-
-      if ($("currentAdminPassword").value !== credentials.password) { showToast("A senha atual não confere."); return; }
-      if (!newUser || newPassword.length < 8) { showToast("Informe um usuário e uma senha com pelo menos 8 caracteres."); return; }
-
-      const previous = credentials;
-      credentials = { user: newUser, password: newPassword };
-      if (!storageSet(STORAGE_KEYS.credentials, JSON.stringify(credentials))) {
-        credentials = previous;
-        showToast("Não foi possível salvar as credenciais.");
-        return;
-      }
-      $("securityForm").reset();
-      showToast("Credenciais alteradas.");
-    });
-
-    function refreshPublishPanel() {
-      const connected = Boolean(publishToken());
-      $("githubToken").value = "";
-      $("githubToken").placeholder = connected ? "Chave conectada (cole outra para trocar)" : "github_pat_...";
-      $("disconnectGithub").hidden = !connected;
-      if (!publishing) setPublishStatus(connected
-        ? (storageGet(STORAGE_KEYS.pending) === "1" ? "Há alterações ainda não publicadas. Clique em \"Conectar e publicar agora\"." : "Conectado. Cada alteração salva vai para o site.")
-        : "Ainda não conectado: as alterações ficam só neste navegador.", connected ? true : null);
-    }
-
-    $("publishForm").addEventListener("submit", async event => {
-      event.preventDefault();
-      const typed = $("githubToken").value.trim();
-      const previous = publishToken();
-      if (typed) storageSet(STORAGE_KEYS.githubToken, typed);
-      if (!publishToken()) { showToast("Cole a chave do GitHub."); return; }
-      setPublishStatus("Conferindo a chave…");
+      const button = event.submitter || $("loginForm").querySelector("button[type=submit]");
+      const label = button ? button.textContent : "";
+      if (button) { button.disabled = true; button.textContent = "Entrando…"; }
+      const slow = setTimeout(() => showToast("Conectando ao servidor… a primeira entrada do dia pode levar até 1 minuto."), 4000);
       try {
-        const res = await githubApi("");
-        const repo = res.ok ? await res.json() : null;
-        if (!repo || !repo.permissions || !repo.permissions.push) throw new Error("Essa chave não tem permissão para salvar no repositório da loja.");
+        const data = await panelApi("/api/login", {
+          method: "POST",
+          body: JSON.stringify({ user: $("loginUser").value.trim(), password: $("loginPassword").value })
+        });
+        sessionSet(STORAGE_KEYS.adminToken, data.token);
+        sessionSet(STORAGE_KEYS.session, "true");
+        $("loginPassword").value = "";
+        openAdmin();
       } catch (error) {
-        if (typed) storageSet(STORAGE_KEYS.githubToken, previous);
-        setPublishStatus(error.message || "Não foi possível conferir a chave.", false);
-        return;
+        showToast(error.message || "Não foi possível entrar.");
+      } finally {
+        clearTimeout(slow);
+        if (button) { button.disabled = false; button.textContent = label; }
       }
-      store.updatedAt = Date.now();
-      storageSet(STORAGE_KEYS.store, JSON.stringify(store));
-      storageSet(STORAGE_KEYS.pending, "1");
-      refreshPublishPanel();
-      await publishNow();
-    });
-
-    $("disconnectGithub").addEventListener("click", () => {
-      storageSet(STORAGE_KEYS.githubToken, "");
-      refreshPublishPanel();
-      showToast("Chave do GitHub removida deste aparelho.");
     });
 
     /* ---------- Eventos ---------- */
