@@ -758,7 +758,19 @@
     .media-add { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
     .media-add .btn { flex: 1 1 180px; min-height: 48px; }
     .media-add .btn svg { width: 19px; height: 19px; flex: none; }
-    .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; clip: rect(0 0 0 0); pointer-events: none; }
+    /* O campo de arquivo fica por cima do botão, invisível: o toque cai direto nele e o celular abre a galeria */
+    .file-btn { position: relative; overflow: hidden; cursor: pointer; }
+    .file-btn input[type=file] {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      opacity: 0;
+      cursor: pointer;
+      font-size: 0;
+    }
+    .file-btn:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
     .link-row { display: flex; gap: 8px; }
     .link-row .field { flex: 1; min-width: 0; }
     .view-info { padding: clamp(22px, 4vw, 40px); display: flex; flex-direction: column; }
@@ -1692,16 +1704,16 @@
         <div class="form-group">
           <div class="media-manager" id="productMediaList"></div>
           <div class="media-add">
-            <button class="btn btn-outline" type="button" data-action="pick-media" data-kind="photo">
+            <label class="btn btn-outline file-btn">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
               Adicionar foto
-            </button>
-            <button class="btn btn-outline" type="button" data-action="pick-media" data-kind="video">
+              <input id="productPhotoFiles" type="file" accept="image/*" multiple aria-label="Adicionar foto">
+            </label>
+            <label class="btn btn-outline file-btn">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="1"/><path d="m16 10 5-3v10l-5-3"/></svg>
               Adicionar vídeo
-            </button>
-            <input class="visually-hidden" id="productPhotoFiles" type="file" accept="image/*" multiple tabindex="-1" aria-hidden="true">
-            <input class="visually-hidden" id="productVideoFiles" type="file" accept="video/*" multiple tabindex="-1" aria-hidden="true">
+              <input id="productVideoFiles" type="file" accept="video/*" aria-label="Adicionar vídeo">
+            </label>
           </div>
           <small>Pode escolher várias fotos de uma vez. O 1º item aparece na vitrine; use ← → para mudar a ordem.
             As fotos são reduzidas automaticamente. Vídeos de até 20 MB (prefira MP4, que abre em todos os celulares).</small>
@@ -3330,7 +3342,6 @@
         case "media-move": moveFormMedia(Number(el.dataset.index), Number(el.dataset.step)); break;
         case "media-remove": formMedia.splice(Number(el.dataset.index), 1); renderFormMedia(); break;
         case "media-add-link": addMediaLink(); break;
-        case "pick-media": $(el.dataset.kind === "video" ? "productVideoFiles" : "productPhotoFiles").click(); break;
         case "export-backup": exportBackup(); break;
         case "reset-products": resetProducts(); break;
       }
