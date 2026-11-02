@@ -3,6 +3,7 @@
  * ---------------------------------------
  * - POST /api/login  { user, password }  -> { token }   (sessão de 12 horas)
  * - PUT  /api/loja   { store }  (com o token)          -> grava loja.json no GitHub da loja
+ * - POST /api/media  { data }   (com o token)          -> grava a foto/vídeo na pasta media/ do site -> { path }
  * - GET  /           -> "ok" (para o Render saber que está no ar)
  *
  * O site (GitHub Pages) lê o loja.json direto do GitHub, então os clientes nunca dependem deste servidor.
@@ -30,7 +31,12 @@ const FILE = "loja.json";
 const ORIGINS = (process.env.ALLOWED_ORIGIN || "https://jardybeachwear.github.io").split(",").map(s => s.trim()).filter(Boolean);
 const SECRET = process.env.SESSION_SECRET ||
   crypto.createHash("sha256").update("jardy|" + ADMIN_PASSWORD + "|" + GITHUB_TOKEN).digest("hex");
-const MAX_BODY = 40 * 1024 * 1024;   // fotos e vídeos vão embutidos no catálogo
+const MAX_BODY = 40 * 1024 * 1024;   // um vídeo de 20 MB vira ~27 MB em texto
+const MAX_MEDIA = 20 * 1024 * 1024;  // tamanho máximo de cada foto/vídeo
+const MEDIA_TYPES = {
+  "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif",
+  "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "video/ogg": "ogv"
+};
 const SESSION_MS = 12 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------- utilidades
@@ -131,10 +137,16 @@ async function currentSha() {
   return (await res.json()).sha || null;
 }
 
-let queue = Promise.resolve();   // uma publicação de cada vez
+let queue = Promise.resolve();   // uma gravação no GitHub de cada vez
+
+function enqueue(task) {
+  const job = queue.then(task);
+  queue = job.catch(() => {});
+  return job;
+}
 
 function publish(store) {
-  const job = queue.then(async () => {
+  return enqueue(async () => {
     const updatedAt = Date.now();
     const content = Buffer.from(JSON.stringify({ app: "jardy", version: 4, updatedAt, store })).toString("base64");
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -156,8 +168,37 @@ function publish(store) {
     }
     throw Object.assign(new Error("Não foi possível publicar agora. Tente de novo."), { status: 503 });
   });
-  queue = job.catch(() => {});
-  return job;
+}
+
+/* Recebe "data:<tipo>;base64,<conteúdo>" e grava como arquivo em media/ no repositório do site */
+function uploadMedia(dataUrl) {
+  const text = String(dataUrl || "");
+  const comma = text.indexOf(",");
+  const head = comma > 0 ? text.slice(0, comma) : "";
+  const match = /^data:([\w.+-]+\/[\w.+-]+);base64$/.exec(head);
+  const ext = match && MEDIA_TYPES[match[1].toLowerCase()];
+  if (!ext) throw Object.assign(new Error("Formato não aceito. Use foto (JPG, PNG, WEBP) ou vídeo (MP4, WEBM, MOV)."), { status: 400 });
+  const content = text.slice(comma + 1).replace(/\s/g, "");
+  if (!content || /[^A-Za-z0-9+/=]/.test(content)) throw Object.assign(new Error("Arquivo inválido."), { status: 400 });
+  if (Math.floor(content.length * 3 / 4) > MAX_MEDIA) throw Object.assign(new Error("Arquivo grande demais (máximo 20 MB)."), { status: 413 });
+
+  const path = `media/${new Date().toISOString().slice(0, 10)}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
+  return enqueue(async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await github(`/contents/${path}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: `Adiciona foto/vídeo de produto (${path})`, content, branch: BRANCH })
+      });
+      if (res.ok) return path;
+      if (res.status === 409) continue;
+      const msg = res.status === 401 || res.status === 403
+        ? "A chave do GitHub (GITHUB_TOKEN) não tem permissão para salvar no site."
+        : `GitHub respondeu ${res.status} ao salvar o arquivo.`;
+      throw Object.assign(new Error(msg), { status: 502 });
+    }
+    throw Object.assign(new Error("Não foi possível enviar o arquivo agora. Tente de novo."), { status: 503 });
+  });
 }
 
 function validStore(store) {
@@ -203,6 +244,17 @@ const server = http.createServer(async (req, res) => {
       }
       attempts.delete(ip);
       send(res, 200, { token: sign({ u: ADMIN_USER, exp: Date.now() + SESSION_MS }) }, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/media") {
+      if (!origin) { send(res, 403, { erro: "Origem não permitida." }); return; }
+      const auth = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+      if (!verify(auth)) { send(res, 401, { erro: "Sessão expirada. Entre no painel de novo." }, origin); return; }
+      if (!GITHUB_TOKEN) { send(res, 503, { erro: "Falta a chave do GitHub (GITHUB_TOKEN) no servidor." }, origin); return; }
+      const body = await readBody(req);
+      const path = await uploadMedia(body.data);
+      send(res, 200, { ok: true, path }, origin);
       return;
     }
 
