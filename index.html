@@ -756,7 +756,9 @@
 
     .media-empty { grid-column: 1 / -1; padding: 16px; border: 1px dashed var(--border); color: var(--muted); font-size: 12px; text-align: center; }
     .media-add { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
-    .media-add .btn { min-height: 42px; cursor: pointer; }
+    .media-add .btn { flex: 1 1 180px; min-height: 48px; }
+    .media-add .btn svg { width: 19px; height: 19px; flex: none; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; clip: rect(0 0 0 0); pointer-events: none; }
     .link-row { display: flex; gap: 8px; }
     .link-row .field { flex: 1; min-width: 0; }
     .view-info { padding: clamp(22px, 4vw, 40px); display: flex; flex-direction: column; }
@@ -1690,10 +1692,18 @@
         <div class="form-group">
           <div class="media-manager" id="productMediaList"></div>
           <div class="media-add">
-            <label class="btn btn-outline" for="productMediaFiles">+ Adicionar fotos e vídeos</label>
-            <input id="productMediaFiles" type="file" accept="image/*,video/mp4,video/webm,video/quicktime" multiple hidden>
+            <button class="btn btn-outline" type="button" data-action="pick-media" data-kind="photo">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
+              Adicionar foto
+            </button>
+            <button class="btn btn-outline" type="button" data-action="pick-media" data-kind="video">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="1"/><path d="m16 10 5-3v10l-5-3"/></svg>
+              Adicionar vídeo
+            </button>
+            <input class="visually-hidden" id="productPhotoFiles" type="file" accept="image/*" multiple tabindex="-1" aria-hidden="true">
+            <input class="visually-hidden" id="productVideoFiles" type="file" accept="video/*" multiple tabindex="-1" aria-hidden="true">
           </div>
-          <small>Pode escolher vários arquivos de uma vez. O 1º item aparece na vitrine; use ← → para mudar a ordem.
+          <small>Pode escolher várias fotos de uma vez. O 1º item aparece na vitrine; use ← → para mudar a ordem.
             As fotos são reduzidas automaticamente. Vídeos de até 20 MB (prefira MP4, que abre em todos os celulares).</small>
         </div>
 
@@ -3011,6 +3021,7 @@
         if (!isImage && !isVideo) { showToast(`"${file.name}" não é uma foto nem um vídeo aceito (use MP4).`); continue; }
         if (isVideo && file.size > MEDIA_LIMITS.video) { showToast(`O vídeo "${file.name}" passa de 20 MB. Use um vídeo mais curto.`); continue; }
 
+        showToast(isVideo ? "Enviando vídeo… pode levar alguns segundos." : "Enviando foto…");
         const localURL = URL.createObjectURL(file);
         const item = { type: isVideo ? "video" : "image", src: localURL, uploading: true };
         const list = formMedia;
@@ -3024,6 +3035,7 @@
           const finalSrc = await storeMediaFile(dataUrl, item.type);
           mediaPreview.set(finalSrc, isImage ? dataUrl : localURL);
           item.src = finalSrc;
+          if (list === formMedia) showToast(`${isVideo ? "Vídeo adicionado" : "Foto adicionada"}. Toque em "Salvar produto" para publicar.`);
         } catch (error) {
           const index = list.indexOf(item);
           if (index >= 0) list.splice(index, 1);
@@ -3055,11 +3067,25 @@
       renderFormMedia();
     }
 
-    $("productMediaFiles").addEventListener("change", event => {
-      const files = [...event.target.files];
-      event.target.value = "";
-      if (files.length) addMediaFiles(files);
+    ["productPhotoFiles", "productVideoFiles"].forEach(inputId => {
+      $(inputId).addEventListener("change", event => {
+        const files = [...event.target.files];
+        event.target.value = "";
+        if (files.length) addMediaFiles(files);
+      });
     });
+
+    /* Um arquivo recém-enviado leva ~1 minuto para aparecer no endereço do site.
+       Enquanto isso, ele é mostrado direto do GitHub da loja, para nunca aparecer quebrado. */
+    const RAW_BASE = `https://raw.githubusercontent.com/${PUBLISH.owner}/${PUBLISH.repo}/${PUBLISH.branch}/`;
+    document.addEventListener("error", event => {
+      const el = event.target;
+      if (!(el instanceof HTMLImageElement || el instanceof HTMLVideoElement)) return;
+      const src = el.getAttribute("src") || "";
+      if (!src.startsWith("media/") || el.dataset.fallback) return;
+      el.dataset.fallback = "1";
+      el.src = RAW_BASE + src;
+    }, true);
 
     $("productForm").addEventListener("submit", async event => {
       event.preventDefault();
@@ -3304,6 +3330,7 @@
         case "media-move": moveFormMedia(Number(el.dataset.index), Number(el.dataset.step)); break;
         case "media-remove": formMedia.splice(Number(el.dataset.index), 1); renderFormMedia(); break;
         case "media-add-link": addMediaLink(); break;
+        case "pick-media": $(el.dataset.kind === "video" ? "productVideoFiles" : "productPhotoFiles").click(); break;
         case "export-backup": exportBackup(); break;
         case "reset-products": resetProducts(); break;
       }
